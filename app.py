@@ -178,12 +178,17 @@ def download_xml(data, filename: str):
 # ================== Утиліта для YouTube ==================
 
 def download_audio_from_youtube(url: str) -> str:
-    """Завантажує аудіо з YouTube за допомогою yt-dlp та повертає шлях до файлу."""
+    """
+    Завантажує оригінальний аудіо-потік з YouTube за допомогою yt-dlp
+    без пост-обробки ffmpeg, і повертає шлях до файлу.
+    """
     tmpdir = tempfile.mkdtemp()
+    # шаблон: збережемо файл у тому вигляді, в якому він був у джерелі
     out_template = os.path.join(tmpdir, 'audio.%(ext)s')
     result = subprocess.run(
-        ['yt-dlp', '-x', '--audio-format', 'mp3', '-o', out_template, url],
-        capture_output=True, text=True
+        ['yt-dlp', '-f', 'bestaudio', '-o', out_template, url],
+        capture_output=True,
+        text=True
     )
     if result.returncode != 0:
         raise Exception(f"Помилка завантаження аудіо: {result.stderr}")
@@ -191,6 +196,7 @@ def download_audio_from_youtube(url: str) -> str:
     if not files:
         raise Exception("Не знайдено файлу аудіо після завантаження")
     return files[0]
+
 
 # ================== Парсери ==================
 
