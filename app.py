@@ -1,5 +1,8 @@
 import re
 import os
+import subprocess
+import tempfile
+import glob
 from io import BytesIO
 
 import streamlit as st
@@ -74,20 +77,6 @@ D. Відповідь D
     - **Правильний** варіант виділяйте **жирним** лише текст відповіді (не префікс).
     - Якщо ваше питання займає кілька рядків, тримайте їх в одному параграфі до першої відповіді.
     - **Не** використовуйте inline-список через `:` і `;` — кожен варіант має власний параграф.
-
-    **Приклад структури документа Word:**
-
-    1. Назва вашого питання?
-    A. Відповідь 1  
-    B. Відповідь 2  
-    C. Відповідь 3  
-
-    2. Інше питання?
-    A. Варіант A  
-    B. Варіант B  
-    C. Варіант C  
-
-    3. І так далі…
 """, unsafe_allow_html=False)
 
 # ================== Утиліти для XML ==================
@@ -140,7 +129,8 @@ def generate_moodle_xml_string(questions) -> str:
                 '    <shuffleanswers>true</shuffleanswers>',
                 f'    <single>{"true" if q_type=="single" else "false"}</single>',
                 '    <answernumbering>abc</answernumbering>',
-                f'    <penalty>{penalty:.6f}</penalty>'
+                f'    <penalty>{penalty:.6f}</penalty>',
+                '    <defaultgrade>1.000000</defaultgrade>'
             ])
             for text, corr in q["answers"]:
                 frac = 100 if corr else 0
@@ -149,6 +139,7 @@ def generate_moodle_xml_string(questions) -> str:
                     f'      <text><![CDATA[{text}]]></text>',
                     '    </answer>'
                 ])
+
         elif q_type == "truefalse":
             correct_true = q["answers"][0][1]
             for val in ("true", "false"):
@@ -158,6 +149,7 @@ def generate_moodle_xml_string(questions) -> str:
                     f'      <text><![CDATA[{val}]]></text>',
                     '    </answer>'
                 ])
+
         elif q_type == "matching":
             lines.append('    <shuffleanswers>true</shuffleanswers>')
             for pair, _ in q["answers"]:
@@ -183,10 +175,27 @@ def download_xml(data, filename: str):
         mime="application/xml"
     )
 
+# ================== Утиліта для YouTube ==================
+
+def download_audio_from_youtube(url: str) -> str:
+    """Завантажує аудіо з YouTube за допомогою yt-dlp та повертає шлях до файлу."""
+    tmpdir = tempfile.mkdtemp()
+    out_template = os.path.join(tmpdir, 'audio.%(ext)s')
+    result = subprocess.run(
+        ['yt-dlp', '-x', '--audio-format', 'mp3', '-o', out_template, url],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        raise Exception(f"Помилка завантаження аудіо: {result.stderr}")
+    files = glob.glob(os.path.join(tmpdir, 'audio.*'))
+    if not files:
+        raise Exception("Не знайдено файлу аудіо після завантаження")
+    return files[0]
+
 # ================== Парсери ==================
 
 def parse_text_format(text: str):
-    """Парсер тестів з тексту з нумерацією та правильними відповідями."""
+    """Парсер готового тесту з тексту."""
     mapping = {'а':'A','А':'A','б':'B','Б':'B','в':'C','В':'C','г':'D','Г':'D'}
     blocks = re.split(r"(?m)(?=^\d+\.)", text.strip())
     blocks = [blk for blk in blocks if blk.strip()]
@@ -229,42 +238,40 @@ def parse_text_format(text: str):
     return questions, errors
 
 def parse_from_excel(uploaded_file):
+    """Парсер тестів з Excel."""
     wb = load_workbook(uploaded_file, data_only=True)
     ws = wb.active
     items = []
     for cell in ws['A']:
         txt = str(cell.value).strip() if cell.value else ""
         is_corr = False
-        if cell.fill and getattr(cell.fill, 'fill_type', None)=='solid':
-            if getattr(cell.fill.start_color, 'rgb', '').endswith('FFFF00'):
+        if cell.fill and getattr(cell.fill, 'fill_type', None) == 'solid':
+            if getattr(cell.fillstart_color, 'rgb', '').endswith('FFFF00'):
                 is_corr = True
         items.append((txt, is_corr))
 
     blocks, curr = [], []
     for txt, corr in items:
         if not txt and curr:
-            blocks.append(curr); curr=[]
+            blocks.append(curr)
+            curr = []
         elif txt:
             curr.append((txt, corr))
-    if curr: blocks.append(curr)
+    if curr:
+        blocks.append(curr)
 
     questions, errors = [], []
-    for idx, blk in enumerate(blocks,1):
-        if len(blk)<3:
-            errors.append((idx, "Потрібно питання + ≥2 відповіді")); continue
+    for idx, blk in enumerate(blocks, 1):
+        if len(blk) < 3:
+            errors.append((idx, "Потрібно питання + ≥2 відповіді"))
+            continue
         questions.append({"text": blk[0][0], "answers": blk[1:]})
     return questions, errors
 
 def parse_from_word(uploaded_file):
-    """
-    Парсер Word:
-    - inline питання з варіантами через ':' та ';' (наприклад, Q24) розділяє на текст і варіанти;
-    - рядки що починаються з 'A.', 'Б.', 'C.' тощо — відповіді (жирні = правильні);
-    - інші — текст нового питання або продовження поточного.
-    """
+    """Парсер тестів з Word (.docx)."""
     doc = Document(uploaded_file)
     answer_pattern = re.compile(r'^[A-ЯA-Z]\.\s*', re.U)
-
     questions, errors = [], []
     curr_q = None
 
@@ -274,21 +281,18 @@ def parse_from_word(uploaded_file):
             if not txt:
                 continue
 
-            # 1) inline питання + відповіді через ':' та ';'
+            # Inline формат: "Питання: A; B; C;"
             if ':' in txt and txt.count(';') >= 2 and not answer_pattern.match(txt):
-                # завершити попереднє
                 if curr_q:
                     questions.append(curr_q)
                 part_q, part_ans = txt.split(':', 1)
-                q_text = part_q.strip()
+                curr_q = {"text": part_q.strip(), "answers": []}
                 segments = [seg.strip().rstrip(';') for seg in part_ans.split(';') if seg.strip()]
-                curr_q = {"text": q_text, "answers": []}
-                # визначаємо правильні по bold в параграфі
                 for seg in segments:
                     is_corr = any(run.bold and seg in run.text for run in para.runs)
                     curr_q["answers"].append((seg, is_corr))
 
-            # 2) префіксні відповіді (A., Б. і т.д.)
+            # Окремі абзаци-відповіді "A. Відповідь"
             elif answer_pattern.match(txt):
                 if curr_q is None:
                     errors.append(f"Відповідь без питання: «{txt}»")
@@ -297,7 +301,6 @@ def parse_from_word(uploaded_file):
                 ans_txt = answer_pattern.sub('', txt)
                 curr_q["answers"].append((ans_txt, is_corr))
 
-            # 3) нове питання або продовження
             else:
                 if curr_q is None:
                     curr_q = {"text": txt, "answers": []}
@@ -315,8 +318,12 @@ def parse_from_word(uploaded_file):
 # ================== Інтерфейс режимів ==================
 
 mode = st.sidebar.selectbox("Виберіть режим створення тесту", [
-    "1. Excel", "2. По тексту (GPT)", "3. Вручну",
-    "4. Готовий тест", "5. Word → XML"
+    "1. Excel",
+    "2. По тексту (GPT)",
+    "3. Вручну",
+    "4. Готовий тест",
+    "5. Word → XML",
+    "6. YouTube → XML"
 ])
 
 # 1️⃣ Excel
@@ -344,7 +351,8 @@ elif mode == "2. По тексту (GPT)":
     st.header("2️⃣ Режим GPT-генерації")
     user_text = st.text_area("Вставте текст для генерації тесту українською", height=200)
     if st.button("Створити тест"):
-        prog = st.progress(0); status = st.empty()
+        prog = st.progress(0)
+        status = st.empty()
         status.text("1/3: Підготовка запиту…"); prog.progress(10)
         system_prompt = (
             """Ви — асистент із жорстким обмеженням на 10 питань у форматі Moodle XML українською мовою.
@@ -354,9 +362,8 @@ elif mode == "2. По тексту (GPT)":
    – 2–3 питання True/False,
    – 2–3 питання Multiple-choice.
 3) Кожне питання (окрім True/False) має мати 4 варіанти (A, B, C, D).
-Для Multiple-choice відзначте кілька варіантів як правильні.
 4) Перед поверненням перевірте, що загальна кількість питань = 10.
-5) Поверніть **тільки** XML-код (без будь-яких коментарів) і одразу припиніть після 10-го питання.
+5) Поверніть **тільки** XML-код (без коментарів) і одразу припиніть після 10-го питання.
 <END>
 """
         )
@@ -367,10 +374,14 @@ elif mode == "2. По тексту (GPT)":
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_text}
             ],
-            temperature=0,
+            temperature=0
         )
-        status.text("3/3: Отримання відповіді…"); prog.progress(70)
+        status.text("3/3: Обробка відповіді…"); prog.progress(70)
         text = resp.choices[0].message.content.strip()
+        # Видаляємо можливі markdown-обгортки ```xml … ```
+        text = re.sub(r"^```(?:xml)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+
         if text.startswith("<?xml") or text.lstrip().startswith("<quiz"):
             count = len(re.findall(r'<question', text))
             if count != 10:
@@ -416,20 +427,20 @@ elif mode == "3. Вручну":
             corr = st.radio("Правильна відповідь", ["true", "false"])
             answers = [("true", corr == "true"), ("false", corr == "false")]
         else:
-            cols = st.columns([8,1])
+            cols = st.columns([8, 1])
             with cols[0]:
                 a1 = st.text_input("A."); a2 = st.text_input("B.")
                 a3 = st.text_input("C."); a4 = st.text_input("D.")
             with cols[1]:
                 c1 = st.checkbox("", key="c1"); c2 = st.checkbox("", key="c2")
                 c3 = st.checkbox("", key="c3"); c4 = st.checkbox("", key="c4")
-            answers = [(a1,c1), (a2,c2), (a3,c3), (a4,c4)]
+            answers = [(a1, c1), (a2, c2), (a3, c3), (a4, c4)]
         submitted = st.form_submit_button("Додати питання")
         if submitted:
             st.session_state.manual_qs.append({"text": q_txt, "answers": answers})
     if st.session_state.manual_qs:
         st.subheader("Список питань")
-        for idx, q in enumerate(st.session_state.manual_qs,1):
+        for idx, q in enumerate(st.session_state.manual_qs, 1):
             st.write(f"{idx}. {q['text']}")
         if st.button("Генерувати XML для ручних питань"):
             xml_str = generate_moodle_xml_string(st.session_state.manual_qs)
@@ -452,13 +463,13 @@ elif mode == "4. Готовий тест":
         else:
             st.success(f"Знайдено {len(qs)} питань — генеруємо XML…")
             xml_str = generate_moodle_xml_string(qs)
-            st.text_area("XML-код", xml_str, height=300, label_visibility="collapsed")
+            st.text_area("", xml_str, height=300, label_visibility="collapsed")
             download_xml(xml_str, "ready_test.xml")
 
 # 5️⃣ Word → XML
 elif mode == "5. Word → XML":
     st.header("5️⃣ Режим Word → Moodle XML")
-    file = st.file_uploader("Завантажте .docx з жирними правильними відповідями", type=["docx"])
+    file = st.file_uploader("Завантажте .docx з жирними правильними відповідіми", type=["docx"])
     if file:
         qs, errs = parse_from_word(file)
         if errs:
@@ -474,3 +485,58 @@ elif mode == "5. Word → XML":
                 st.subheader("📄 Попередній перегляд XML")
                 st.text_area("", xml_str, height=300)
                 download_xml(xml_str, "word_test.xml")
+
+# 6️⃣ YouTube → XML
+elif mode == "6. YouTube → XML":
+    st.header("6️⃣ Режим YouTube → Moodle XML")
+    yt_url = st.text_input("Вставте посилання на YouTube відео")
+    if st.button("Створити тест з відео"):
+        prog = st.progress(0)
+        status = st.empty()
+        try:
+            status.text("1/4: Завантаження аудіо з YouTube…"); prog.progress(10)
+            audio_path = download_audio_from_youtube(yt_url)
+
+            status.text("2/4: Транскрибація аудіо…"); prog.progress(30)
+            with open(audio_path, 'rb') as audio_file:
+                transcript_resp = openai.Audio.transcribe("whisper-1", audio_file)
+            transcript_text = transcript_resp["text"]
+
+            status.text("3/4: Генерація питань GPT…"); prog.progress(60)
+            system_prompt = (
+                """Ви — асистент із жорстким обмеженням на 10 питань у форматі Moodle XML українською мовою.
+1) Використайте тільки наданий текст.
+2) Створіть **саме 10** логічних питань українською:
+   – 4–5 питань Single-choice,
+   – 2–3 питання True/False,
+   – 2–3 питання Multiple-choice.
+3) Кожне питання (окрім True/False) має мати 4 варіанти (A, B, C, D).
+4) Перед поверненням перевірте, що загальна кількість питань = 10.
+5) Поверніть **тільки** XML-код (без коментарів) і одразу припиніть після 10-го питання.
+<END>
+"""
+            )
+            resp = openai.ChatCompletion.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": transcript_text}
+                ],
+                temperature=0
+            )
+            status.text("4/4: Обробка відповіді…"); prog.progress(80)
+            xml_content = resp.choices[0].message.content.strip()
+            # Видаляємо можливі markdown-обгортки ```xml … ```
+            xml_content = re.sub(r"^```(?:xml)?\s*", "", xml_content)
+            xml_content = re.sub(r"\s*```$", "", xml_content)
+
+            if not xml_content.startswith("<?xml"):
+                xml_content = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" + xml_content
+
+            st.subheader("📄 Попередній перегляд XML")
+            st.code(xml_content)
+            download_xml(xml_content, "youtube_test.xml")
+            status.text("Готово!"); prog.progress(100)
+
+        except Exception as e:
+            st.error(f"Помилка: {e}")
