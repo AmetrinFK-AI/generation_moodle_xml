@@ -260,43 +260,74 @@ def parse_text_format(text: str):
 
     return questions, errors
 
+
 def parse_from_excel(uploaded_file):
-    """Парсер тестів з Excel."""
+    """
+    Парсер тестів з Excel.
+    Витягує з першої колонки (A) питання та відповіді, де правильні відповіді
+    відмічені заливкою жовтим кольором (код FFFF00).
+    Повертає список питань і список помилок.
+    """
     wb = load_workbook(uploaded_file, data_only=True)
     ws = wb.active
+
     items = []
     for cell in ws['A']:
-        txt = str(cell.value).strip() if cell.value else ""
-        is_corr = False
+        # Отримуємо текст у клітинці (якщо є), приводимо до рядка
+        txt = str(cell.value).strip() if cell.value is not None else ""
+        is_corr = False  # прапорець, чи ця клітинка — правильна відповідь
 
-        # Проверяем, что у ячейки есть заливка типа 'solid'
+        # Перевіряємо, чи в клітинки є заливка типу 'solid'
         fill = getattr(cell, 'fill', None)
         if fill and getattr(fill, 'fill_type', None) == 'solid':
-            # Теперь берём цвет заливки через fill.start_color
+            # Отримуємо об'єкт Color (start_color)
             start_color = getattr(fill, 'start_color', None)
-            rgb = getattr(start_color, 'rgb', '') or ''
-            if rgb.endswith('FFFF00'):
+            # Спробуємо дістати значення rgb, якщо воно є
+            raw_rgb = getattr(start_color, 'rgb', None)
+
+            # Перетворюємо вхідне значення у рядок (щоб уникнути помилок),
+            # або встановлюємо пустий рядок, якщо raw_rgb ≠ str
+            rgb = raw_rgb if isinstance(raw_rgb, str) else ""
+            # Перевіряємо, чи кінець rgb збігається з 'FFFF00' (жовтий)
+            if rgb.upper().endswith('FFFF00'):
                 is_corr = True
 
         items.append((txt, is_corr))
 
-    # Группируем строки в блоки (вопрос + ответы)
-    blocks, curr = [], []
+    # Далі групуємо отримані (текст, is_corr) у блоки:
+    # кожен блок — це питання (перша клітинка) + всі відповіді до
+    # першого порожнього рядка
+    blocks = []
+    curr = []
     for txt, corr in items:
         if not txt and curr:
+            # зустріли порожню клітинку — зберігаємо попередній блок
             blocks.append(curr)
             curr = []
         elif txt:
             curr.append((txt, corr))
     if curr:
+        # додаємо останній блок, якщо він не пустий
         blocks.append(curr)
 
-    questions, errors = [], []
+    questions = []
+    errors = []
+
     for idx, blk in enumerate(blocks, 1):
+        # Переконуємося, що в блоці є хоча б 1 питання + ≥2 відповіді
         if len(blk) < 3:
-            errors.append((idx, "Потрібно питання + ≥2 відповіді"))
+            errors.append((idx, "Потрібно принаймні 1 питання та 2 відповіді"))
             continue
-        questions.append({"text": blk[0][0], "answers": blk[1:]})
+
+        # Перший елемент блоку — текст питання, решта — відповіді
+        question_text = blk[0][0]
+        answer_list = blk[1:]
+
+        questions.append({
+            "text": question_text,
+            "answers": answer_list
+        })
+
     return questions, errors
 
 def parse_from_word(uploaded_file):
