@@ -268,11 +268,19 @@ def parse_from_excel(uploaded_file):
     for cell in ws['A']:
         txt = str(cell.value).strip() if cell.value else ""
         is_corr = False
-        if cell.fill and getattr(cell.fill, 'fill_type', None) == 'solid':
-            if getattr(cell.fillstart_color, 'rgb', '').endswith('FFFF00'):
+
+        # Проверяем, что у ячейки есть заливка типа 'solid'
+        fill = getattr(cell, 'fill', None)
+        if fill and getattr(fill, 'fill_type', None) == 'solid':
+            # Теперь берём цвет заливки через fill.start_color
+            start_color = getattr(fill, 'start_color', None)
+            rgb = getattr(start_color, 'rgb', '') or ''
+            if rgb.endswith('FFFF00'):
                 is_corr = True
+
         items.append((txt, is_corr))
 
+    # Группируем строки в блоки (вопрос + ответы)
     blocks, curr = [], []
     for txt, corr in items:
         if not txt and curr:
